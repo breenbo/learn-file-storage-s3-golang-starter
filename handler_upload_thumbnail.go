@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,6 +60,12 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	// store the image on the filesysytem
+	mimeType, _, err := mime.ParseMediaType(header.Header.Get("Content-type"))
+	if mimeType != "image/jpeg" && mimeType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "invalid image", err)
+		return
+	}
+
 	fileExtension := strings.Split(header.Header.Get("Content-type"), "/")[1]
 	thumbName := fmt.Sprintf("%s.%s", video.ID, fileExtension)
 	thumbPath := filepath.Join(cfg.assetsRoot, thumbName)
