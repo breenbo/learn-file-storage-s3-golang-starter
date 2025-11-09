@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -67,7 +69,14 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	fileExtension := strings.Split(header.Header.Get("Content-type"), "/")[1]
-	thumbName := fmt.Sprintf("%s.%s", video.ID, fileExtension)
+	videoUUID := make([]byte, 32)
+	_, err = rand.Read(videoUUID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to generate the file name", err)
+		return
+	}
+	filename := base64.RawURLEncoding.EncodeToString(videoUUID)
+	thumbName := fmt.Sprintf("%s.%s", filename, fileExtension)
 	thumbPath := filepath.Join(cfg.assetsRoot, thumbName)
 
 	emptyFile, err := os.Create(thumbPath)
