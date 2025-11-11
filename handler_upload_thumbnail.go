@@ -68,7 +68,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	fileExtension := strings.Split(header.Header.Get("Content-type"), "/")[1]
+	fileExtension := strings.Split(mimeType, "/")[1]
 	videoUUID := make([]byte, 32)
 	_, err = rand.Read(videoUUID)
 	if err != nil {
