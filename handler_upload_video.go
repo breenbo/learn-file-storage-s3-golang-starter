@@ -1,10 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -97,8 +104,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	defer os.Remove("tubely-upload.mp4")
 	defer tempFile.Close()
 
-	_, err = io.Copy(tempFile, video)
-	if err != nil {
+	if _, err = io.Copy(tempFile, video); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create temp file", err)
 		return
 	}
@@ -106,8 +112,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	//
 	// read the file from the begining (after copy, pointer to the end of the file)
 	//
-	_, err = tempFile.Seek(0, io.SeekStart)
-	if err != nil {
+	if _, err = tempFile.Seek(0, io.SeekStart); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error with temp file", err)
 		return
 	}
@@ -115,15 +120,45 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	//
 	// Send the video to S3
 	//
+	// change key depending on the video ratio
+	directory := "other"
+	ratio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error getting picture ratio", err)
+	}
+
+	switch ratio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	}
+
+	// generate the key
 	key := getAssetPath(mimeType)
+	key = path.Join(directory, key)
+
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not open processed file", err)
+		return
+	}
+	defer processedFile.Close()
+
 	putObjectInput := s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(key),
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mimeType),
 	}
-	_, err = cfg.s3Client.PutObject(r.Context(), &putObjectInput)
-	if err != nil {
+	if _, err = cfg.s3Client.PutObject(r.Context(), &putObjectInput); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't upload video to S3", err)
 		return
 	}
@@ -133,8 +168,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	//
 	url := cfg.getObjectURL(key)
 	DBvideo.VideoURL = &url
-	err = cfg.db.UpdateVideo(DBvideo)
-	if err != nil {
+	if err = cfg.db.UpdateVideo(DBvideo); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video URL", err)
 		return
 	}
@@ -143,4 +177,70 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	// respond with the video
 	//
 	respondWithJSON(w, http.StatusOK, DBvideo)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "error", "-print_format", "json", "-show_streams", filePath,
+	)
+
+	//
+	// store the cmd results into a buffer
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	//
+	// run the command
+	if err := cmd.Run(); err != nil {
+		log.Fatal("Error running ffprobe: ", err)
+	}
+
+	//
+	// store results to json
+	var output struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		return "", fmt.Errorf("could not parse ffprobe output: %v", err)
+	}
+	if len(output.Streams) == 0 {
+		return "", errors.New("no video stream found")
+	}
+
+	//
+	// get the video format
+	width := output.Streams[0].Width
+	height := output.Streams[0].Height
+
+	if width == 16*height/9 {
+		return "16:9", nil
+	} else if height == 16*width/9 {
+		return "9:16", nil
+	}
+
+	return "other", nil
+}
+
+func processVideoForFastStart(inputFilePath string) (string, error) {
+	processedFilePath := fmt.Sprintf("%s.processing", inputFilePath)
+
+	cmd := exec.Command("ffmpeg", "-i", inputFilePath, "-movflags", "faststart", "-codec", "copy", "-f", "mp4", processedFilePath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("error processing video: %s, %v", stderr.String(), err)
+	}
+
+	fileInfo, err := os.Stat(processedFilePath)
+	if err != nil {
+		return "", fmt.Errorf("could not stat processed file: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		return "", fmt.Errorf("processed file is empty")
+	}
+
+	return processedFilePath, nil
 }
